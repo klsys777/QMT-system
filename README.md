@@ -1,6 +1,6 @@
-# QMT-system
-## Some QMT system models
+# 基于ai brooks价格行为的量化交易系统
+## PA system
 
 ---
 
-### 1. Trend-Strategy-model
+### 1. 3K-趋势跟随系统（移动止盈-止损）
