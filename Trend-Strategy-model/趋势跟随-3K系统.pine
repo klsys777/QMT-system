@@ -1,0 +1,253 @@
+//@version=6
+strategy(
+    "系统1-变种2-3K策略（收盘1/3 + EMA20 + EMA50 + ZigZag方向控制）",
+    overlay=true,
+    initial_capital=100000,
+    default_qty_type=strategy.percent_of_equity,
+    default_qty_value=100,
+    pyramiding=1,
+    currency=currency.USD,
+    calc_on_every_tick=true
+)
+
+// =======================
+// 1️⃣ 用户可调参数
+// =======================
+maxTradeDuration = input.int(title="最大持仓周期（天）", defval=22, minval=1)
+X                = input.int(title="挂单有效K线数", defval=3, minval=1)
+profitMultiplier = input.float(title="止盈倍数", defval=1.0, minval=0.1, step=0.1)
+
+// EMA50 共振开关
+useEMA50Filter = input.bool(
+    title="启用 EMA50 共振过滤",
+    defval=true,
+    tooltip="开启后：多单需同时在 EMA20 和 EMA50 上方；空单相反"
+)
+
+lb = input.int(5, "左侧K线数量")
+rb = input.int(5, "右侧K线数量")
+
+showhh = input.bool(true, "显示更高高点（HH）")
+showhl = input.bool(true, "显示更高低点（HL）")
+showlh = input.bool(true, "显示更低高点（LH）")
+showll = input.bool(true, "显示更低低点（LL）")
+
+// =======================
+// 2️⃣ Pivot 高低点
+// =======================
+ph = ta.pivothigh(high, lb, rb)
+pl = ta.pivotlow(low, lb, rb)
+
+hl = not na(ph) ? 1 : (not na(pl) ? -1 : na)
+zz = not na(ph) ? ph : (not na(pl) ? pl : na)
+
+// =======================
+// 3️⃣ 查找前4个 ZigZag 点
+// =======================
+findPrevious() =>
+    var float loc1 = na
+    var float loc2 = na
+    var float loc3 = na
+    var float loc4 = na
+    int xx = 1
+    int ehl = hl == 1 ? -1 : 1
+
+    for x = 1 to 100
+        if hl[x] == ehl and not na(zz[x])
+            loc1 := zz[x]
+            xx := x + 1
+            break
+
+    ehl := hl
+    for x = xx to 100
+        if hl[x] == ehl and not na(zz[x])
+            loc2 := zz[x]
+            xx := x + 1
+            break
+
+    ehl := hl == 1 ? -1 : 1
+    for x = xx to 100
+        if hl[x] == ehl and not na(zz[x])
+            loc3 := zz[x]
+            xx := x + 1
+            break
+
+    ehl := hl
+    for x = xx to 100
+        if hl[x] == ehl and not na(zz[x])
+            loc4 := zz[x]
+            break
+
+    [loc1, loc2, loc3, loc4]
+
+[loc1, loc2, loc3, loc4] = findPrevious()
+float a = zz
+float b = loc1
+float c = loc2
+float d = loc3
+float e = loc4
+
+// =======================
+// 4️⃣ 判断 HH/HL/LH/LL
+// =======================
+_hh = not na(a) and not na(b) and not na(c) and not na(d) and (a > b and a > c and c > b and c > d)
+_ll = not na(a) and not na(b) and not na(c) and not na(d) and (a < b and a < c and c < b and c < d)
+_hl = not na(a) and not na(b) and not na(c) and not na(d) and not na(e) and ((a >= c and (b > c and b > d and d > c and d > e)) or (a < b and a > c and b < d))
+_lh = not na(a) and not na(b) and not na(c) and not na(d) and not na(e) and ((a <= c and (b < c and b < d and d < c and d < e)) or (a > b and a < c and b > d))
+
+// =======================
+// 5️⃣ EMA 趋势线
+// =======================
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+
+// =======================
+// 6️⃣ 定义红K和绿K（收盘位置 + 开盘方向）
+// =======================
+closePos = (high != low) ? (close - low) / (high - low) : 0.5
+greenDay = (closePos >= 2.0 / 3.0) and (close > open)
+redDay   = (closePos <= 1.0 / 3.0) and (close < open)
+
+// =======================
+// 7️⃣ EMA 趋势过滤条件
+// =======================
+longTrendOk  = close > ema20 and (not useEMA50Filter or close > ema50)
+shortTrendOk = close < ema20 and (not useEMA50Filter or close < ema50)
+
+// =======================
+// 8️⃣ 连续三根阳线 / 阴线 + EMA 共振
+// =======================
+threeGreen = greenDay and greenDay[1] and greenDay[2] and longTrendOk
+threeRed   = redDay   and redDay[1]   and redDay[2]   and shortTrendOk
+
+// =======================
+// 9️⃣ 持仓记录
+// =======================
+var int entryBarIndex = na
+var string entryType = ""
+
+// =======================
+// 🔟 挂单记录
+// =======================
+var float buyStopPrice  = na
+var float sellStopPrice = na
+var int buySignalBar  = na
+var int sellSignalBar = na
+tickSize = syminfo.mintick
+
+// =======================
+// 11️⃣ 止损 / 止盈记录
+// =======================
+var float stopLossPrice   = na
+var float takeProfitPrice = na
+
+// =======================
+// 12️⃣ ZigZag 趋势方向控制（修复 na 类型问题）
+// =======================
+var int trendFlag = na  // 1 表示多头趋势有效, -1 表示空头趋势有效
+
+if _hh
+    trendFlag := 1
+if _hl and (trendFlag == 1 or na(trendFlag))
+    trendFlag := 1
+
+if _ll
+    trendFlag := -1
+if _lh and (trendFlag == -1 or na(trendFlag))
+    trendFlag := -1
+
+// =======================
+// 13️⃣ 严格单仓挂单逻辑（增加 trendFlag 条件）
+// =======================
+if strategy.position_size == 0
+
+    // ---------- 多单 ----------
+    if threeGreen and trendFlag == 1
+        buyStopPrice  := high + tickSize
+        buySignalBar  := bar_index
+
+        stopLossPrice := math.min(low, math.min(low[1], low[2]))
+        greenRange = math.max(close, math.max(close[1], close[2])) - math.min(open,  math.min(open[1],  open[2]))
+        takeProfitPrice := close + greenRange * profitMultiplier
+
+        entryType     := "多单"
+        entryBarIndex := bar_index
+
+    // ---------- 空单 ----------
+    if threeRed and trendFlag == -1
+        sellStopPrice := low - tickSize
+        sellSignalBar := bar_index
+
+        stopLossPrice := math.max(high, math.max(high[1], high[2]))
+        redRange = math.max(open,  math.max(open[1],  open[2])) - math.min(close, math.min(close[1], close[2]))
+        takeProfitPrice := close - redRange * profitMultiplier
+
+        entryType     := "空单"
+        entryBarIndex := bar_index
+
+// =======================
+// 14️⃣ 挂单有效期 & 下单
+// =======================
+if strategy.position_size == 0
+
+    if not na(buyStopPrice)
+        if bar_index - buySignalBar < X
+            strategy.order("买入挂单", strategy.long, stop=buyStopPrice)
+        else
+            buyStopPrice := na
+            buySignalBar := na
+
+    if not na(sellStopPrice)
+        if bar_index - sellSignalBar < X
+            strategy.order("卖出挂单", strategy.short, stop=sellStopPrice)
+        else
+            sellStopPrice := na
+            sellSignalBar := na
+
+// =======================
+// 15️⃣ 持仓后止损 / 止盈
+// =======================
+if strategy.position_size > 0 and entryType == "多单"
+    strategy.exit("平多单", from_entry="买入挂单",
+        stop=stopLossPrice,
+        limit=takeProfitPrice)
+
+if strategy.position_size < 0 and entryType == "空单"
+    strategy.exit("平空单", from_entry="卖出挂单",
+        stop=stopLossPrice,
+        limit=takeProfitPrice)
+
+// =======================
+// 16️⃣ 固定天数离场
+// =======================
+tradeDuration = not na(entryBarIndex) ? bar_index - entryBarIndex : 0
+
+if strategy.position_size != 0 and tradeDuration >= maxTradeDuration
+    strategy.close_all(comment="固定天数离场")
+
+    entryBarIndex   := na
+    entryType       := ""
+    buyStopPrice    := na
+    sellStopPrice   := na
+    buySignalBar    := na
+    sellSignalBar   := na
+    stopLossPrice   := na
+    takeProfitPrice := na
+
+// =======================
+// 17️⃣ EMA 可视化
+// =======================
+//plot(ema20, title="EMA20", color=color.lime, linewidth=2)
+//plot(ema50, title="EMA50", color=color.orange, linewidth=2)
+
+// =======================
+// 18️⃣ 用 label.new 固定标签位置
+// =======================
+//if showhh and _hh
+//    label.new(bar_index - rb, a, "HH", color=color.lime, textcolor=color.black, style=label.style_label_down)
+//if showhl and _hl
+//    label.new(bar_index - rb, a, "HL", color=color.lime, textcolor=color.black, style=label.style_label_up)
+//if showll and _ll
+//    label.new(bar_index - rb, a, "LL", color=color.red, textcolor=color.white, style=label.style_label_up)
+//if showlh and _lh
+//    label.new(bar_index - rb, a, "LH", color=color.red, textcolor=color.white, style=label.style_label_down)
